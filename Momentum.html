@@ -1,0 +1,370 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>1次元衝突シミュレーション（運動量保存）</title>
+
+  <style>
+    body { font-family: sans-serif; }
+    #controls { margin-bottom: 10px; }
+    label { margin-right: 8px; }
+
+    canvas {
+      border: 1px solid #333;
+      background: #fafafa;
+    }
+
+    /* グラフ3つを横並び（PC）→ 縦並び（スマホ） */
+    #graphs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    #graphs canvas {
+      flex: 1 1 260px;
+      max-width: 100%;
+    }
+
+    @media (max-width: 600px) {
+      #graphs {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<h2>1次元衝突シミュレーション（運動量保存＋反発係数）</h2>
+
+<div id="controls">
+  <div>
+    <label>m1: <input id="m1" type="number" value="1" step="0.1"></label>
+    <label>v1: <input id="v1" type="number" value="2" step="0.1"></label>
+  </div>
+  <div>
+    <label>m2: <input id="m2" type="number" value="1" step="0.1"></label>
+    <label>v2: <input id="v2" type="number" value="-1" step="0.1"></label>
+  </div>
+  <div>
+    <label>反発係数 e: <input id="e" type="number" value="1" step="0.1" min="0" max="1"></label>
+  </div>
+
+  <button id="startBtn">スタート</button>
+  <button id="pauseBtn">一時停止</button>
+  <button id="resetBtn">リセット</button>
+</div>
+
+<!-- メインアニメーション -->
+<canvas id="cv" width="800" height="150"></canvas>
+
+<!-- グラフ3つ -->
+<div id="graphs">
+  <canvas id="graph_v" width="260" height="150"></canvas>
+  <canvas id="graph_p" width="260" height="150"></canvas>
+  <canvas id="graph_e" width="260" height="150"></canvas>
+</div>
+
+<p id="info"></p>
+
+<script>
+(function() {
+
+  /* -------------------------
+     基本セットアップ
+  ------------------------- */
+
+  const canvas = document.getElementById('cv');
+  const ctx = canvas.getContext('2d');
+
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const info = document.getElementById('info');
+
+  const m1Input = document.getElementById('m1');
+  const v1Input = document.getElementById('v1');
+  const m2Input = document.getElementById('m2');
+  const v2Input = document.getElementById('v2');
+  const eInput  = document.getElementById('e');
+
+  const radius1 = 20;
+  const radius2 = 20;
+
+  let x1, x2;
+  let v1, v2;
+  let m1, m2, e;
+  let running = false;
+  let collided = false;
+  let lastTime = null;
+
+  function initPositions() {
+    x1 = canvas.width * 0.25;
+    x2 = canvas.width * 0.75;
+  }
+
+  function readInputs() {
+    m1 = parseFloat(m1Input.value);
+    v1 = parseFloat(v1Input.value);
+    m2 = parseFloat(m2Input.value);
+    v2 = parseFloat(v2Input.value);
+    e  = parseFloat(eInput.value);
+
+    if (isNaN(m1) || m1 <= 0) m1 = 1;
+    if (isNaN(m2) || m2 <= 0) m2 = 1;
+    if (isNaN(e)  || e < 0)   e  = 0;
+    if (e > 1) e = 1;
+  }
+
+  /* -------------------------
+     グラフ用データ
+  ------------------------- */
+
+  let timeHistory = [];
+
+  let v1History = [];
+  let v2History = [];
+
+  let p1History = [];
+  let p2History = [];
+  let pHistory  = [];  // p_total
+
+  let k1History = [];
+  let k2History = [];
+  let eHistory  = [];  // K_total
+
+  let t = 0;
+
+  /* -------------------------
+     グラフ描画関数（総量は太線）
+  ------------------------- */
+
+  function drawGraph(canvasId, xData, yDataList, colors, labels, yLabel, boldIndex = -1) {
+    const cvs = document.getElementById(canvasId);
+    const ctx = cvs.getContext('2d');
+    ctx.clearRect(0, 0, cvs.width, cvs.height);
+
+    // 軸
+    ctx.strokeStyle = "#333";
+    ctx.beginPath();
+    ctx.moveTo(40, 10);
+    ctx.lineTo(40, 140);
+    ctx.lineTo(250, 140);
+    ctx.stroke();
+
+    // ラベル
+    ctx.fillStyle = "#000";
+    ctx.fillText("t", 230, 155);
+    ctx.fillText(yLabel, 5, 20);
+
+    if (xData.length < 2) return;
+
+    const xmin = xData[0];
+    const xmax = xData[xData.length - 1];
+
+    // y の min/max（余裕あり）
+    let ymin = Infinity, ymax = -Infinity;
+    for (let arr of yDataList) {
+      for (let v of arr) {
+        ymin = Math.min(ymin, v);
+        ymax = Math.max(ymax, v);
+      }
+    }
+    if (ymin === ymax) ymax = ymin + 1;
+
+    const margin = (ymax - ymin) * 0.1;
+    ymin -= margin;
+    ymax += margin;
+
+    // データ線
+    yDataList.forEach((yData, idx) => {
+      ctx.strokeStyle = colors[idx];
+      ctx.lineWidth = (idx === boldIndex ? 3 : 1.5);
+
+      ctx.beginPath();
+      for (let i = 0; i < xData.length; i++) {
+        const x = 40 + (xData[i] - xmin) / (xmax - xmin) * 210;
+        const y = 140 - (yData[i] - ymin) / (ymax - ymin) * 120;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = colors[idx];
+      ctx.fillText(labels[idx], 60 + idx * 60, 20);
+    });
+
+    ctx.lineWidth = 1;
+  }
+
+  /* -------------------------
+     メイン描画
+  ------------------------- */
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = '#aaa';
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height / 2);
+    ctx.lineTo(canvas.width, canvas.height / 2);
+    ctx.stroke();
+
+    ctx.fillStyle = 'steelblue';
+    ctx.beginPath();
+    ctx.arc(x1, canvas.height / 2, radius1, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = 'tomato';
+    ctx.beginPath();
+    ctx.arc(x2, canvas.height / 2, radius2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /* -------------------------
+     アニメーション step
+  ------------------------- */
+
+  function step(timestamp) {
+    if (!running) return;
+
+    if (!lastTime) lastTime = timestamp;
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+
+    x1 += v1 * dt * 60;
+    x2 += v2 * dt * 60;
+
+    // 衝突判定
+    const dist = Math.abs(x2 - x1);
+    const minDist = radius1 + radius2;
+
+    if (!collided && dist <= minDist) {
+      collided = true;
+
+      const overlap = minDist - dist;
+      const dir = x2 > x1 ? 1 : -1;
+      x1 -= dir * overlap / 2;
+      x2 += dir * overlap / 2;
+
+      const v1_before = v1;
+      const v2_before = v2;
+
+      const v1_after = ((m1 - e * m2) * v1_before + (1 + e) * m2 * v2_before) / (m1 + m2);
+      const v2_after = ((m2 - e * m1) * v2_before + (1 + e) * m1 * v1_before) / (m1 + m2);
+
+      v1 = v1_after;
+      v2 = v2_after;
+
+      const p_before = m1 * v1_before + m2 * v2_before;
+      const p_after  = m1 * v1_after  + m2 * v2_after;
+
+      const ke_before = 0.5 * m1 * v1_before * v1_before + 0.5 * m2 * v2_before * v2_before;
+      const ke_after  = 0.5 * m1 * v1_after  * v1_after  + 0.5 * m2 * v2_after  * v2_after;
+
+      info.textContent =
+        `衝突直前: p=${p_before.toFixed(2)}, KE=${ke_before.toFixed(2)}  ` +
+        `衝突直後: p=${p_after.toFixed(2)}, KE=${ke_after.toFixed(2)}`;
+    }
+
+    draw();
+
+    /* -------------------------
+       グラフ用データ更新
+    ------------------------- */
+
+    t += dt;
+
+    const k1 = 0.5 * m1 * v1 * v1;
+    const k2 = 0.5 * m2 * v2 * v2;
+
+    const p1 = m1 * v1;
+    const p2 = m2 * v2;
+
+    timeHistory.push(t);
+
+    v1History.push(v1);
+    v2History.push(v2);
+
+    p1History.push(p1);
+    p2History.push(p2);
+    pHistory.push(p1 + p2);
+
+    k1History.push(k1);
+    k2History.push(k2);
+    eHistory.push(k1 + k2);
+
+    drawGraph("graph_v", timeHistory,
+              [v1History, v2History],
+              ["steelblue", "tomato"],
+              ["v1", "v2"],
+              "v");
+
+    drawGraph("graph_p", timeHistory,
+              [p1History, p2History, pHistory],
+              ["steelblue", "tomato", "green"],
+              ["p1", "p2", "p_total"],
+              "p",
+              2);
+
+    drawGraph("graph_e", timeHistory,
+              [k1History, k2History, eHistory],
+              ["steelblue", "tomato", "green"],
+              ["K1", "K2", "K_total"],
+              "E",
+              2);
+
+    requestAnimationFrame(step);
+  }
+
+  /* -------------------------
+     ボタン処理
+  ------------------------- */
+
+  startBtn.addEventListener('click', () => {
+    readInputs();
+    initPositions();
+    collided = false;
+    running = true;
+    lastTime = null;
+    info.textContent = '';
+
+    timeHistory = [];
+    v1History = [];
+    v2History = [];
+    p1History = [];
+    p2History = [];
+    pHistory  = [];
+    k1History = [];
+    k2History = [];
+    eHistory  = [];
+    t = 0;
+
+    draw();
+    requestAnimationFrame(step);
+  });
+
+  pauseBtn.addEventListener('click', () => {
+    running = false;
+  });
+
+  resetBtn.addEventListener('click', () => {
+    running = false;
+    collided = false;
+    readInputs();
+    initPositions();
+    info.textContent = '';
+    draw();
+  });
+
+  readInputs();
+  initPositions();
+  draw();
+
+})();
+</script>
+
+</body>
+</html>
