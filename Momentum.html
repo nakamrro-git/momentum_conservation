@@ -267,6 +267,10 @@
       info.textContent =
         `衝突直前: p=${p_before.toFixed(2)}, KE=${ke_before.toFixed(2)}  ` +
         `衝突直後: p=${p_after.toFixed(2)}, KE=${ke_after.toFixed(2)}`;
+
+      // ★ 衝突後の速度を出力
+      info.textContent +=
+        `  衝突後の速度: v1=${v1_after.toFixed(2)}, v2=${v2_after.toFixed(2)}`;
     }
 
     draw();
